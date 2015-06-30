@@ -1,0 +1,148 @@
+#!/bin/bash
+
+function create () {
+    set -e
+    if [ -z $1 ]; then
+        echo "shocker: missing argument <subdomain>"
+        help_create
+        exit 1
+    fi
+
+    SUBDOMAIN=$1
+    echo "Creating subdomain $SUBDOMAIN..."
+    if [ -e "/etc/nginx/conf.d/$SUBDOMAIN.conf" ]; then
+        echo "Subdomain $SUBDOMAIN already exits. Delete with:"
+        echo "shocker destroy $SUBDOMAIN"
+        exit 1
+    fi
+
+    DOMAIN="localhost"
+    MAX_PORT=10000
+    shopt -s nullglob
+    for F in /etc/nginx/conf.d/*.conf; do
+        CONTAINER=$(basename $F .conf)
+        PORT=$(sudo docker inspect $CONTAINER | python -c "import json; import sys; print json.loads(sys.stdin.read())[0]['NetworkSettings']['Ports'].values()[-1][0]['HostPort']")
+        if [ "$PORT" -gt "$MAX_PORT" ]; then
+            MAX_PORT=$PORT
+        fi
+    done
+
+    NEW_PORT_HTTP=$(($MAX_PORT + 2))
+    NEW_PORT_SSH=$(($MAX_PORT + 3))
+
+    CID=$(sudo docker run -e "HOST_USER=$USER" -e "HOST_PASSWORD=$(sudo grep $USER /etc/shadow)" -v "$HOME/.ssh/id_rsa.pub:/host/authorized_keys" --name $SUBDOMAIN -d -t -p $NEW_PORT_HTTP:80 -p $NEW_PORT_SSH:22 sshd)
+
+    cat << EOF | sudo tee > /dev/null /etc/nginx/conf.d/$SUBDOMAIN.conf
+server {
+    server_name $SUBDOMAIN.$DOMAIN.com;
+    location / {
+        proxy_pass http://127.0.0.1:$NEW_PORT_HTTP;
+    }
+}
+EOF
+
+    sudo /etc/init.d/nginx reload
+    echo "Server is ready to use and is available at $SUBDOMAIN.$DOMAIN.com (ssh port: $NEW_PORT_SSH)"
+}
+
+function destroy () {
+    set -e
+
+    if [ -z $1 ]; then
+        echo "shocker: missing argument <subdomain>"
+        echo ""
+        help_destroy
+        exit 1
+    fi
+
+    SUBDOMAIN=$1
+    echo "Destroying subdomain $SUBDOMAIN..."
+
+    sudo docker rm -f $SUBDOMAIN
+    sudo rm /etc/nginx/conf.d/$SUBDOMAIN.conf
+    sudo /etc/init.d/nginx reload
+    echo "Subdomain $SUBDOMAIN is removed"
+}
+
+function help_usage() {
+    cat << EOF
+shocker <command> [-h|--help]
+
+commands:
+  create   Create container for subdomain
+  destroy  Destroy container for subdomain
+
+EOF
+}
+
+function help_create() {
+    cat << EOF
+Usage: shocker create <subdomain>
+  Create a container that serves http under <subdomain>
+  and echo the port on which it listens to ssh
+
+  Example: shocker create myapp
+
+EOF
+}
+
+function help_destroy() {
+    cat << EOF
+Usage: shocker destroy <subdomain>
+  Destroy the container running under <subdomain> and
+  delete it for all eternity
+
+  Example: shocker destroy myapp
+
+EOF
+}
+
+function help_main() {
+    cat << EOF
+Shocker
+Manage docker containers with ssh-access
+that serves http under a subdomain.
+
+EOF
+
+    help_usage
+    help_create
+    help_destroy
+}
+
+function get_opts() {
+    ARGS=`getopt -o "h" -l "help" -n "shocker" -- "$@"`
+    if [ $? -ne 0 ]; then
+        echo ""
+        help_usage
+        exit 1
+    fi
+    eval set -- "$ARGS"
+
+    while true; do
+        case "$1" in
+            -h|--help) help_main; shift; exit 1;;
+            *) shift; break;;
+        esac
+    done
+    shift
+}
+
+get_opts $@
+
+if [ -z "$1" ]; then
+    help_usage
+    exit 1
+fi
+
+case "$1" in
+    create)
+        create $2;;
+    destroy)
+        destroy $2;;
+    *)
+        echo "shocker: invalid command -- '$1'";
+        echo ""
+        help_usage;;
+esac
+
